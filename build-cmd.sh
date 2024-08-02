@@ -20,10 +20,10 @@ else
 fi
 
 OGG_SOURCE_DIR="libogg"
-OGG_VERSION="$(sed -n "s/^ VERSION='\(.*\)'/\1/p" "$OGG_SOURCE_DIR/configure")"
+OGG_VERSION="$(sed -n "s/^AC_INIT(\[libogg\],\[\(.*\)\]\,\[ogg-dev@xiph.org\])/\1/p" "$OGG_SOURCE_DIR/configure.ac")"
 
 VORBIS_SOURCE_DIR="libvorbis"
-VORBIS_VERSION="$(sed -n "s/^PACKAGE_VERSION='\(.*\)'/\1/p" "$VORBIS_SOURCE_DIR/configure")"
+VORBIS_VERSION="$(sed -n "s/^AC_INIT(\[libvorbis\],\[\(.*\)\]\,\[vorbis-dev@xiph.org\])/\1/p" "$VORBIS_SOURCE_DIR/configure.ac")"
 
 top="$(pwd)"
 stage="$(pwd)/stage"
@@ -39,92 +39,274 @@ source "$(dirname "$AUTOBUILD_VARIABLES_FILE")/functions"
 build=${AUTOBUILD_BUILD_ID:=0}
 echo "${OGG_VERSION}-${VORBIS_VERSION}.${build}" > "${stage}/VERSION.txt"
 
+apply_patch()
+{
+    local patch="$1"
+    local path="$2"
+    echo "Applying $patch..."
+    git apply --check --directory="$path" "$patch" && git apply --directory="$path" "$patch"
+}
+
+apply_patch "patches/libvorbis/0001-vendored-ogg-build.patch" "libvorbis"
+
+# setup staging dirs
+mkdir -p "$stage/include/"
+mkdir -p "$stage/lib/debug"
+mkdir -p "$stage/lib/release"
+
 case "$AUTOBUILD_PLATFORM" in
     windows*)
-        function copy_result {
-            # $1 is the build directory in which to find the result
-            # $2 is the basename of the .lib file we expect to find there
-            cp "win32/$1/$2.lib" "$stage/lib/release/"
-            # This is odd, but empirically even VS 2017 (aka vc150) produces a
-            # vc120.pdb file into $1. Since the string "vc120" isn't obviously
-            # embedded in either the .sln file or the various .vcxproj files,
-            # we didn't dig further to try to figure out how to change it
-            # there. (If we were going to change it there, we'd want to change
-            # it to match the .lib name itself, instead of having to rename it
-            # in this copy command.)
-            #cp "win32/$1/vc120.pdb" "$stage/lib/release/$2.pdb"
-        }
-
         pushd "$OGG_SOURCE_DIR"
+            mkdir -p "build_debug"
+            pushd "build_debug"
+                cmake .. -G "Ninja Multi-Config" -DBUILD_SHARED_LIBS=OFF \
+                    -DBUILD_TESTING=ON \
+                    -DCMAKE_INSTALL_PREFIX="$(cygpath -m $stage)/ogg_debug"
 
-        build_sln "win32/ogg.sln" "Release|$AUTOBUILD_WIN_VSPLATFORM" "ogg_static"
+                cmake --build . --config Debug
+                cmake --install . --config Debug
 
-        mkdir -p "$stage/lib/release"
-        copy_result Static_Release ogg_static
+                # conditionally run unit tests
+                if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
+                    ctest -C Debug
+                fi
+            popd
 
-        mkdir -p "$stage/include"
-        cp -a "include/ogg/" "$stage/include/"
+            mkdir -p "build_release"
+            pushd "build_release"
+                cmake .. -G "Ninja Multi-Config" -DBUILD_SHARED_LIBS=OFF \
+                    -DBUILD_TESTING=ON \
+                    -DCMAKE_INSTALL_PREFIX="$(cygpath -m $stage)/ogg_release"
 
+                cmake --build . --config Release
+                cmake --install . --config Release
+
+                # conditionally run unit tests
+                if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
+                    ctest -C Release
+                fi
+            popd
         popd
+
+        # copy ogg libs
+        cp ${stage}/ogg_debug/lib/ogg.lib ${stage}/lib/debug/libogg.lib
+        cp ${stage}/ogg_release/lib/ogg.lib ${stage}/lib/release/libogg.lib
+
+        # copy ogg headers
+        cp -a $stage/ogg_release/include/* $stage/include/
+
         pushd "$VORBIS_SOURCE_DIR"
+            mkdir -p "build_debug"
+            pushd "build_debug"
+                cmake .. -G "Ninja Multi-Config" \
+                    -DOGG_LIBRARIES="$(cygpath -m $stage)/lib/debug/libogg.lib" \
+                    -DOGG_INCLUDE_DIRS="$(cygpath -m $stage)/include" \
+                    -DBUILD_SHARED_LIBS=OFF \
+                    -DBUILD_TESTING=ON \
+                    -DCMAKE_INSTALL_PREFIX="$(cygpath -m $stage)/vorbis_debug"
 
-        build_sln "win32/vorbis.sln" "Release|$AUTOBUILD_WIN_VSPLATFORM" "vorbis_static"
-        build_sln "win32/vorbis.sln" "Release|$AUTOBUILD_WIN_VSPLATFORM" "vorbisenc_static"
-        build_sln "win32/vorbis.sln" "Release|$AUTOBUILD_WIN_VSPLATFORM" "vorbisfile_static"
+                cmake --build . --config Debug
+                cmake --install . --config Debug
 
-        copy_result Vorbis_Static_Release     vorbis_static
-        copy_result VorbisEnc_Static_Release  vorbisenc_static
-        copy_result VorbisFile_Static_Release vorbisfile_static
-        cp -a "include/vorbis/" "$stage/include/"
+                # conditionally run unit tests
+                if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
+                    ctest -C Debug
+                fi
+            popd
+
+            mkdir -p "build_release"
+            pushd "build_release"
+                cmake .. -G "Ninja Multi-Config" \
+                    -DOGG_LIBRARIES="$(cygpath -m $stage)/lib/release/libogg.lib" \
+                    -DOGG_INCLUDE_DIRS="$(cygpath -m $stage)/include" \
+                    -DBUILD_SHARED_LIBS=OFF \
+                    -DBUILD_TESTING=ON \
+                    -DCMAKE_INSTALL_PREFIX="$(cygpath -m $stage)/vorbis_release"
+
+                cmake --build . --config Release
+                cmake --install . --config Release
+
+                # conditionally run unit tests
+                if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
+                    ctest -C Release
+                fi
+            popd
         popd
+
+        # copy vorbis libs
+        cp ${stage}/vorbis_debug/lib/vorbis.lib ${stage}/lib/debug/libvorbis.lib
+        cp ${stage}/vorbis_debug/lib/vorbisenc.lib ${stage}/lib/debug/libvorbisenc.lib
+        cp ${stage}/vorbis_debug/lib/vorbisfile.lib ${stage}/lib/debug/libvorbisfile.lib
+        cp ${stage}/vorbis_release/lib/vorbis.lib ${stage}/lib/release/libvorbis.lib
+        cp ${stage}/vorbis_release/lib/vorbisenc.lib ${stage}/lib/release/libvorbisenc.lib
+        cp ${stage}/vorbis_release/lib/vorbisfile.lib ${stage}/lib/release/libvorbisfile.lib
+
+        # copy vorbis headers
+        cp -a $stage/vorbis_release/include/* $stage/include/
     ;;
     darwin*)
-        pushd "$OGG_SOURCE_DIR"
-        opts="-arch $AUTOBUILD_CONFIGURE_ARCH $LL_BUILD_RELEASE"
+        # Setup build flags
+        opts="${TARGET_OPTS:--arch $AUTOBUILD_CONFIGURE_ARCH $LL_BUILD_RELEASE}"
         plainopts="$(remove_cxxstd $opts)"
-        export CFLAGS="$plainopts" 
-        export CXXFLAGS="$opts" 
-        export LDFLAGS="$plainopts"
-        ./configure --prefix="$stage"
-        make
-        make install
+
+        pushd "$OGG_SOURCE_DIR"
+            mkdir -p "build_release_x86"
+            pushd "build_release_x86"
+                CFLAGS="$plainopts" \
+                cmake .. -GNinja -DCMAKE_BUILD_TYPE="Release" -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=ON \
+                    -DCMAKE_C_FLAGS="$plainopts" \
+                    -DCMAKE_OSX_ARCHITECTURES:STRING=x86_64 \
+                    -DCMAKE_MACOSX_RPATH=YES \
+                    -DCMAKE_INSTALL_PREFIX="$stage/ogg_release_x86"
+
+                cmake --build . --config Release
+                cmake --install . --config Release
+
+                # conditionally run unit tests
+                if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
+                    ctest -C Release
+                fi
+            popd
+
+            # mkdir -p "build_release_arm64"
+            # pushd "build_release_arm64"
+            #     CFLAGS="$C_OPTS_ARM64" \
+            #     LDFLAGS="$LINK_OPTS_ARM64" \
+            #     cmake .. -G Ninja -DCMAKE_BUILD_TYPE="Release" -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=ON \
+            #         -DCMAKE_C_FLAGS="$C_OPTS_ARM64" \
+            #         -DCMAKE_OSX_ARCHITECTURES:STRING=arm64 \
+            #         -DCMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} \
+            #         -DCMAKE_MACOSX_RPATH=YES \
+            #         -DCMAKE_INSTALL_PREFIX="$stage/ogg_release_arm64"
+
+            #     cmake --build . --config Release
+            #     cmake --install . --config Release
+
+            #     # conditionally run unit tests
+            #     if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
+            #         ctest -C Release
+            #     fi
+            # popd
+
+            # # create fat libraries
+            # lipo -create ${stage}/ogg_release_x86/lib/libogg.a ${stage}/ogg_release_arm64/lib/libogg.a -output ${stage}/lib/release/libogg.a
+
+            # copy files
+            cp -a ${stage}/ogg_release_x86/lib/libogg.a ${stage}/lib/release/libogg.a
+            cp -a $stage/ogg_release_x86/include/* $stage/include/
         popd
-        
+
         pushd "$VORBIS_SOURCE_DIR"
-        ./configure --prefix="$stage"
-        make
-        make install
+            mkdir -p "build_release_x86"
+            pushd "build_release_x86"
+                CFLAGS="$plainopts" \
+                cmake .. -G Ninja -DCMAKE_BUILD_TYPE="Release" -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=ON \
+                    -DOGG_LIBRARIES="${stage}/lib/release/libogg.a" -DOGG_INCLUDE_DIRS="$stage/include" \
+                    -DCMAKE_C_FLAGS="$plainopts" \
+                    -DCMAKE_OSX_ARCHITECTURES:STRING=x86_64 \
+                    -DCMAKE_MACOSX_RPATH=YES \
+                    -DCMAKE_INSTALL_PREFIX="$stage/vorbis_release_x86"
+
+                cmake --build . --config Release
+                cmake --install . --config Release
+
+                # conditionally run unit tests
+                if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
+                    ctest -C Release
+                fi
+            popd
+
+            # mkdir -p "build_release_arm64"
+            # pushd "build_release_arm64"
+            #     CFLAGS="$C_OPTS_ARM64" \
+            #     LDFLAGS="$LINK_OPTS_ARM64" \
+            #     cmake .. -G Ninja -DCMAKE_BUILD_TYPE="Release" -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=ON \
+            #         -DOGG_LIBRARIES="${stage}/lib/release/libogg.a" -DOGG_INCLUDE_DIRS="$stage/include" \
+            #         -DCMAKE_C_FLAGS="$C_OPTS_ARM64" \
+            #         -DCMAKE_OSX_ARCHITECTURES:STRING=arm64 \
+            #         -DCMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} \
+            #         -DCMAKE_MACOSX_RPATH=YES \
+            #         -DCMAKE_INSTALL_PREFIX="$stage/vorbis_release_arm64"
+
+            #     cmake --build . --config Release
+            #     cmake --install . --config Release
+
+            #     # conditionally run unit tests
+            #     if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
+            #        ctest -C Release
+            #     fi
+            # popd
+
+            # # create fat libraries
+            # lipo -create ${stage}/vorbis_release_x86/lib/libvorbis.a ${stage}/vorbis_release_arm64/lib/libvorbis.a -output ${stage}/lib/release/libvorbis.a
+            # lipo -create ${stage}/vorbis_release_x86/lib/libvorbisenc.a ${stage}/vorbis_release_arm64/lib/libvorbisenc.a -output ${stage}/lib/release/libvorbisenc.a
+            # lipo -create ${stage}/vorbis_release_x86/lib/libvorbisfile.a ${stage}/vorbis_release_arm64/lib/libvorbisfile.a -output ${stage}/lib/release/libvorbisfile.a
+
+            # copy headers
+            cp -a $stage/vorbis_release_x86/lib/libvorbis.a $stage/lib/release/libvorbis.a
+            cp -a $stage/vorbis_release_x86/lib/libvorbisenc.a $stage/lib/release/libvorbisenc.a
+            cp -a $stage/vorbis_release_x86/lib/libvorbisfile.a $stage/lib/release/libvorbisfile.a
+            cp -a $stage/vorbis_release_x86/include/* $stage/include/
         popd
-        
-        mv "$stage/lib" "$stage/release"
-        mkdir -p "$stage/lib"
-        mv "$stage/release" "$stage/lib"
      ;;
     linux*)
-        pushd "$OGG_SOURCE_DIR"
+        # Default target per autobuild build --address-size
         opts="-m$AUTOBUILD_ADDRSIZE $LL_BUILD_RELEASE"
         plainopts="$(remove_cxxstd $opts)"
-        autoreconf -fi
-        CFLAGS="$plainopts" CXXFLAGS="$opts" ./configure --prefix="$stage"
-        make
-        make install
+
+        pushd "$OGG_SOURCE_DIR"
+            mkdir -p "build"
+            pushd "build"
+                CFLAGS="$plainopts" \
+                cmake .. -GNinja -DBUILD_SHARED_LIBS:BOOL=OFF -DBUILD_TESTING=ON \
+                    -DCMAKE_BUILD_TYPE="Release" \
+                    -DCMAKE_C_FLAGS="$plainopts" \
+                    -DCMAKE_INSTALL_PREFIX="$stage/ogg_release"
+
+                cmake --build . --config Release
+                cmake --install . --config Release
+
+                # conditionally run unit tests
+                if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
+                   ctest -C Release
+                fi
+            popd
+
+            # Copy libraries
+            cp -a ${stage}/ogg_release/lib/*.a ${stage}/lib/release/
+
+            # copy headers
+            cp -a ${stage}/ogg_release/include/* ${stage}/include/
         popd
         
         pushd "$VORBIS_SOURCE_DIR"
-        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:"$stage/lib"
-        autoreconf -fi
-        CFLAGS="$plainopts" CXXFLAGS="$opts" ./configure --prefix="$stage"
-        make
-        make install
+            mkdir -p "build"
+            pushd "build"
+                CFLAGS="$plainopts" \
+                cmake .. -GNinja -DBUILD_SHARED_LIBS:BOOL=OFF \
+                    -DCMAKE_BUILD_TYPE="Release" \
+                    -DCMAKE_C_FLAGS="$plainopts" \
+                    -DCMAKE_INSTALL_PREFIX="$stage/vorbis_release" \
+                    -DOGG_LIBRARIES="$stage/lib/release/libogg.a" \
+                    -DOGG_INCLUDE_DIRS="$stage/include"
+
+                cmake --build . --config Release
+                cmake --install . --config Release
+
+                # conditionally run unit tests
+                if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
+                   ctest -C Release
+                fi
+            popd
+
+            # Copy libraries
+            cp -a ${stage}/vorbis_release/lib/*.a ${stage}/lib/release/
+
+            # copy headers
+            cp -a ${stage}/vorbis_release/include/* ${stage}/include/
         popd
-        
-        mv "$stage/lib" "$stage/release"
-        mkdir -p "$stage/lib"
-        mv "$stage/release" "$stage/lib"
     ;;
 esac
-mkdir -p "$stage/LICENSES"
-pushd "$OGG_SOURCE_DIR"
-    cp COPYING "$stage/LICENSES/ogg-vorbis.txt"
-popd
 
+mkdir -p "$stage/LICENSES"
+cp $OGG_SOURCE_DIR/COPYING "$stage/LICENSES/ogg-vorbis.txt"
