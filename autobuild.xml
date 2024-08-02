@@ -113,6 +113,7 @@
           </map>
           <key>manifest</key>
           <array>
+            <string>lib/debug/*.lib</string>
             <string>lib/release/*.lib</string>
           </array>
           <key>name</key>
